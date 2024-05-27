@@ -7,7 +7,9 @@ use App\Models\Company;
 use App\Services\SunatService;
 use Greenter\Report\XmlUtils;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Luecano\NumeroALetras\NumeroALetras;
+use Illuminate\Support\Facades\DB;
 
 class InvoiceController extends Controller
 {
@@ -42,7 +44,42 @@ class InvoiceController extends Controller
         $response['hash'] = (new XmlUtils())->getHashSign($response['xml']);
         $response['sunatResponse'] = $sunat->sunatResponse($result);
 
+        $this->storeInvoice($invoice, $result, $response['hash'], $company->id ,$see);
+
+
         return $response;
+    }
+
+    private function storeInvoice($invoice, $result, $hash, $companyId, $see){
+        try {
+            $lastCorrelativo = DB::table('documents')
+            ->where('serie', $invoice->getSerie())
+            ->sharedLock() // Bloquea la tabla para lectura compartida hasta que la transacción se complete
+            ->max('number');
+
+            $newCorrelativo = $lastCorrelativo + 1;
+
+
+            $status = $result->isSuccess() ? 'Aceptado' : 'Rechazado';
+            $error = $result->isSuccess() ? null : $result->getError()->getMessage();
+
+            DB::table('documents')->insert([
+                'document_type' => $invoice->getTipoDoc(),
+                'date' => $invoice->getFechaEmision()->format('Y-m-d'),
+                'number' => $invoice->getCorrelativo(),
+                'serie' => $newCorrelativo,
+                'customer_id' => 1,
+                'company_id' => $companyId,
+                'status' => $status,
+                'hash' => $hash,
+                'xml' => base64_encode($see->getFactory()->getLastXml()), // Se usa el parámetro $see
+                'error' => $error,
+            ]);
+        } catch (\Exception $e) {
+            // Manejo de la excepción
+            Log::error('Error al almacenar la factura en la base de datos: ' . $e->getMessage());
+        }
+
     }
 
     public function xml(Request $request)
@@ -66,7 +103,7 @@ class InvoiceController extends Controller
 
         $sunat = new SunatService;
         $see = $sunat->getSee($company);
-        $invoice = $sunat->getInvoice($data);   
+        $invoice = $sunat->getInvoice($data);
 
         $response['xml'] = $see->getXmlSigned($invoice);
         $response['hash'] = (new XmlUtils())->getHashSign($response['xml']);
